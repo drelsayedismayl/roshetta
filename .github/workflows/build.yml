@@ -1,0 +1,91 @@
+name: روشتة - نشر الموقع والتطبيق والإشعارات
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      notify:
+        description: 'ابعت إشعار تجريبي دلوقتي'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '0 6,9,12,15,18,20 * * *'
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  site:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.dep.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          mkdir _site
+          for z in site*.zip; do unzip -q -o "$z" -d _site -x 'android-app/*' 'notify/*' 'README.md' 'firestore.rules' 'tools/*'; done
+          unzip -q -o site.zip 'tools/merge.py' -d _tools
+          if [ -d updates ]; then cp -r updates/. _site/; fi
+          python3 _tools/tools/merge.py _site/data/content.json updates/extra.json
+          rm -f _site/extra.json
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: dep
+        uses: actions/deploy-pages@v4
+
+  apk:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: unzip -q site.zip 'android-app/*' -d .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - working-directory: android-app
+        run: |
+          npm install
+          npx cap add android
+          npx --yes @capacitor/assets generate --android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug
+      - run: cp android-app/android/app/build/outputs/apk/debug/app-debug.apk roshetta.apk
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: roshetta-android
+          name: روشتة للأندرويد
+          files: roshetta.apk
+          make_latest: true
+
+  notify:
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.notify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          unzip -q site.zip 'notify/*' -d .
+          unzip -p site.zip data/content.json > notify/content.json
+          unzip -q -o site.zip 'tools/merge.py' -d _tools
+          python3 _tools/tools/merge.py notify/content.json updates/extra.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - working-directory: notify
+        run: |
+          if [ -z "$FIREBASE_SERVICE_ACCOUNT" ]; then echo "Firebase مش متربط لسه، تخطّي الإشعارات"; exit 0; fi
+          npm install firebase-admin
+          node send.js
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          SITE_URL: https://drelsayedismayl.github.io/roshetta/
